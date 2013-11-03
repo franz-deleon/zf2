@@ -51,6 +51,16 @@ class ServiceManager implements ServiceLocatorInterface
     /**
      * @var array[]
      */
+    protected $constructibleClasses = array();
+
+    /**
+     * @var array[]
+     */
+    protected $constructibleArgs = array();
+
+    /**
+     * @var array[]
+     */
     protected $delegators = array();
 
     /**
@@ -222,6 +232,61 @@ class ServiceManager implements ServiceLocatorInterface
     public function retrieveFromPeeringManagerFirst()
     {
         return $this->retrieveFromPeeringManagerFirst;
+    }
+
+    /**
+     * Set a constructible class
+     *
+     * @param  string  $name                  Unique service name for a constructible
+     * @param  mixed   $constructibleClass    Fully qualified name space of a constructible class
+     * @param  bool    $shared                Is the service shared?
+     * @return ServiceManager
+     * @throws Exception\InvalidServiceNameException
+     */
+    public function setConstructibleClass($name, $constructibleClass, $shared = false)
+    {
+        $cName = $this->canonicalizeName($name);
+
+        if ($this->has($cName, false)) {
+            if ($this->allowOverride === false) {
+                throw new Exception\InvalidServiceNameException(sprintf(
+                    '%s: A service by the name of "%s" or alias already exists and
+                    cannot be overridden, please use an alternate name.',
+                    get_class($this) . '::' . __FUNCTION__,
+                    $name
+                ));
+            }
+            $this->unregisterService($cName);
+        }
+
+        $this->constructibleClasses[$cName] = $constructibleClass;
+        $this->shared[$cName]               = (bool) $shared;
+
+        return $this;
+    }
+
+    /**
+     * Set the arguments for a constuctible class
+     *
+     * @param sting $name         Service name of the constructible
+     * @param array $arguments    The arguments for a constructible class
+     * @throws Exception\ServiceNotFoundException
+     */
+    public function setConstructibleArgs($name, array $arguments)
+    {
+        $cName = $this->canonicalizeName($name);
+
+        if (!isset($this->constructibleClasses[$cName])) {
+            throw new Exception\ServiceNotFoundException(sprintf(
+                '%s: A service by the name of "%s" was not found as constructible',
+                get_class($this) . '::' . __FUNCTION__,
+                $name
+            ));
+        }
+
+        $this->constructibleArgs[$cName] = $arguments;
+
+        return $this;
     }
 
     /**
@@ -599,14 +664,19 @@ class ServiceManager implements ServiceLocatorInterface
     public function doCreate($rName, $cName)
     {
         $instance = null;
+        $isFromConstructible = false;
 
         if (isset($this->factories[$cName])) {
             $instance = $this->createFromFactory($cName, $rName);
         }
-
         if ($instance === null && isset($this->invokableClasses[$cName])) {
             $instance = $this->createFromInvokable($cName, $rName);
         }
+        if ($instance === null && isset($this->constructibleClasses[$cName])) {
+            $instance = $this->createFromConstructible($cName, $rName);
+            $isFromConstructible = (!is_null($instance)) ? true : false;
+        }
+
         $this->checkNestedContextStart($cName);
         if ($instance === null && $this->canCreateFromAbstractFactory($cName, $rName)) {
             $instance = $this->createFromAbstractFactory($cName, $rName);
@@ -623,7 +693,8 @@ class ServiceManager implements ServiceLocatorInterface
         }
 
         // Do not call initializers if we do not have an instance
-        if ($instance === null) {
+        // or if the instance is from a constructible
+        if ($instance === null || true === $isFromConstructible) {
             return $instance;
         }
 
@@ -978,6 +1049,55 @@ class ServiceManager implements ServiceLocatorInterface
         }
 
         return null;
+    }
+
+    /**
+     * Attempt to create an instance via a constructible class
+     *
+     * @param  string $canonicalName
+     * @param  string $requestedName
+     * @return null|\stdClass
+     * @throws Exception\ServiceNotFoundException   If resolved class does not exist
+     * @throws Exception\ServiceNotCreatedException If resolved class does not have a constructor
+     * @throws Exception\ServiceNotCreatedException If there are no set arguments for a constructible
+     */
+    protected function createFromConstructible($canonicalName, $requestedName)
+    {
+        $constructible = $this->constructibleClasses[$canonicalName];
+        if (!class_exists($constructible)) {
+            throw new Exception\ServiceNotFoundException(sprintf(
+                '%s: failed retrieving "%s%s" via constructible class "%s"; class does not exist',
+                get_class($this) . '::' . __FUNCTION__,
+                $canonicalName,
+                ($requestedName ? '(alias: ' . $requestedName . ')' : ''),
+                $constructible
+            ));
+        }
+
+        // constructor cannot be found in the class
+        if (!in_array('__construct', get_class_methods($constructible))) {
+            throw new Exception\ServiceNotCreatedException(sprintf(
+                '%s: cannot instantiate "%s%s"; class "%s" has no constructor',
+                get_class($this) . '::' . __FUNCTION__,
+                $canonicalName,
+                ($requestedName ? '(alias: ' . $requestedName . ')' : ''),
+                $constructible
+            ));
+        // constructible has no arguments
+        } elseif (!isset($this->constructibleArgs[$canonicalName])) {
+            throw new Exception\ServiceNotCreatedException(sprintf(
+                '%s: cannot instantiate "%s%s"; "%s" have no arguments set',
+                get_class($this) . '::' . __FUNCTION__,
+                $canonicalName,
+                ($requestedName ? '(alias: ' . $requestedName . ')' : ''),
+                $canonicalName
+            ));
+        }
+
+        $r = new ReflectionClass($constructible);
+        $instance = $r->newInstanceArgs($this->constructibleArgs[$canonicalName]);
+
+        return $instance;
     }
 
     /**
